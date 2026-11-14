@@ -10,6 +10,27 @@ function showStatus(message) {
     statusText.textContent = message;
 }
 
+// Render's free tier sleeps when idle and can take up to ~60s to wake up,
+// so use a long timeout instead of letting the request fail silently.
+async function apiFetch(options = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(function () {
+        controller.abort();
+    }, 60000);
+
+    try {
+        return await fetch(API_URL, { ...options, signal: controller.signal });
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+function formatTime(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    return isNaN(date.getTime()) ? '' : date.toLocaleString();
+}
+
 function displayMessage(user, text, time = '') {
     const welcome = chatBody.querySelector('.welcome-message');
 
@@ -41,13 +62,14 @@ function displayMessage(user, text, time = '') {
 
 async function loadMessages() {
     try {
-        const response = await fetch(API_URL);
+        const response = await apiFetch();
 
         if (!response.ok) {
-            throw new Error('Unable to load messages');
+            throw new Error('Server responded with ' + response.status);
         }
 
-        const data = await response.json();
+        const json = await response.json();
+        const data = Array.isArray(json) ? json : (json.messages || []);
 
         chatBody.replaceChildren();
 
@@ -70,14 +92,17 @@ async function loadMessages() {
             displayMessage(
                 message.user,
                 message.text,
-                message.createdAt
-                    ? new Date(message.createdAt).toLocaleString()
-                    : ''
+                formatTime(message.createdAt)
             );
         });
 
+        if (statusText.textContent.startsWith('Unable to load')) {
+            showStatus('');
+        }
+
     } catch (error) {
-        showStatus('Unable to load messages. Please try again.');
+        console.error('loadMessages failed:', error);
+        showStatus('Unable to load messages. The server may be waking up, please try again in a moment.');
     }
 }
 
@@ -86,7 +111,7 @@ async function sendMessage(user, text) {
     showStatus('Sending message...');
 
     try {
-        const response = await fetch(API_URL, {
+        const response = await apiFetch({
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -98,7 +123,7 @@ async function sendMessage(user, text) {
         });
 
         if (!response.ok) {
-            throw new Error('Message could not be sent');
+            throw new Error('Server responded with ' + response.status);
         }
 
         textInput.value = '';
@@ -107,7 +132,8 @@ async function sendMessage(user, text) {
         await loadMessages();
 
     } catch (error) {
-        showStatus('Failed to send. Please check your connection.');
+        console.error('sendMessage failed:', error);
+        showStatus('Failed to send. Please check your connection and try again.');
     } finally {
         sendButton.disabled = false;
     }
@@ -127,8 +153,28 @@ sendButton.addEventListener('click', function () {
 
 textInput.addEventListener('keydown', function (event) {
     if (event.key === 'Enter') {
+        event.preventDefault();
         sendButton.click();
     }
 });
 
-loadMessages();
+userInput.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        textInput.focus();
+    }
+});
+
+showStatus('Loading messages...');
+loadMessages().then(function () {
+    if (statusText.textContent === 'Loading messages...') {
+        showStatus('');
+    }
+});
+
+// Refresh every 10 seconds to pick up other people's messages
+setInterval(function () {
+    if (!sendButton.disabled) {
+        loadMessages();
+    }
+}, 10000);
